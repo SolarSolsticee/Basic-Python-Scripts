@@ -9,9 +9,9 @@ import matplotlib.patches as patches
 import logging
 import os
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog
-
-# Removed pandas import as it's no longer needed in this single-image version
+from tkinter import filedialog, messagebox
+import PySimpleGUI as sg  # Import PySimpleGUI
+import pandas as pd  # Import pandas for Excel output
 
 # Configure logging for better feedback
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -94,9 +94,10 @@ def measure_thickness_edt(binary_image):
 
 def visualize_thickness_2d(thickness_map, original_image_for_overlay=None, unit_label="pixels",
                            roi_data=None, distance_per_pixel_for_drawing=1.0, plot_basename="2D Thickness Map",
-                           original_filename="", canny_params=None):
+                           original_filename="", canny_params=None, save_path=None):
     """
     Visualizes the 2D thickness map. Optionally overlays the original image and ROI boxes.
+    Saves the plot to save_path if provided, otherwise displays it.
 
     Args:
         thickness_map (np.array): The 2D array of thickness values.
@@ -108,6 +109,7 @@ def visualize_thickness_2d(thickness_map, original_image_for_overlay=None, unit_
         plot_basename (str): The user-defined basename for the plot title.
         original_filename (str): The filename of the original image.
         canny_params (dict, optional): Dictionary containing 'sigma', 'low_threshold', 'high_threshold'.
+        save_path (str, optional): Full path to save the plot. If None, the plot is displayed.
     """
     if thickness_map.ndim != 2:
         logging.error("Thickness map must be 2D for visualization.")
@@ -115,7 +117,10 @@ def visualize_thickness_2d(thickness_map, original_image_for_overlay=None, unit_
 
     logging.info(f"Visualizing 2D thickness map in {unit_label}.")
 
-    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+    # Set figure size for 2000x1000 resolution at 100 dpi
+    # 2000 pixels / 100 dpi = 20 inches
+    # 1000 pixels / 100 dpi = 10 inches
+    fig, ax = plt.subplots(1, 1, figsize=(20, 10))  # Changed figsize to (20, 10)
 
     # Apply vertical flip to both images for correct orientation
     flipped_thickness_map = np.flipud(thickness_map)
@@ -248,25 +253,17 @@ def visualize_thickness_2d(thickness_map, original_image_for_overlay=None, unit_
                 bbox=dict(boxstyle='round,pad=0.5', fc='white', alpha=0.7, ec='gray'))
 
     plt.tight_layout()
-    # Removed save_path logic, now always displays
-    plt.show()
-    logging.info("2D thickness map visualization complete.")
+
+    if save_path:
+        plt.savefig(save_path, dpi=100)  # Explicitly set DPI to 100 for 2000x1000 pixels
+        plt.close(fig)  # Close the figure to free memory
+        logging.info(f"Plot saved to {save_path}")
+    else:
+        plt.show()
+        logging.info("2D thickness map visualization complete.")
 
 
-def get_float_input(title, prompt, default_value, parent):
-    """Helper function to get float input with error handling."""
-    while True:
-        value_str = simpledialog.askstring(title, prompt, initialvalue=str(default_value), parent=parent)
-        if value_str is None:  # User cancelled
-            logging.info(f"User cancelled input for '{title}'. Using default value: {default_value}")
-            return default_value  # Return default value if cancelled
-        try:
-            float_value = float(value_str)
-            logging.info(f"User entered '{float_value}' for '{title}'.")
-            return float_value
-        except ValueError:
-            messagebox.showerror("Invalid Input", "Please enter a valid number.")
-
+# Removed get_float_input as we're using PySimpleGUI for all initial inputs
 
 def extract_rois_from_image(roi_image_path, target_shape):
     """
@@ -293,7 +290,7 @@ def extract_rois_from_image(roi_image_path, target_shape):
             rgb_img = roi_img
             alpha_channel = None  # No explicit alpha
         else:
-            messagebox.showwarning("ROI Image Warning", "ROI image is not RGB or RGBA. Cannot detect red boxes.")
+            sg.popup_ok("ROI Image Warning", "ROI image is not RGB or RGBA. Cannot detect red boxes.")
             logging.warning("ROI image is not RGB/RGBA. Cannot detect red boxes.")
             return []
 
@@ -313,8 +310,8 @@ def extract_rois_from_image(roi_image_path, target_shape):
                    (rgb_img[:, :, 2] < blue_threshold_high)
 
         if not np.any(red_mask):
-            messagebox.showwarning("ROI Detection Failed",
-                                   "No red pixels detected in the ROI image. Please check the image content and color thresholds.")
+            sg.popup_ok("ROI Detection Failed",
+                        "No red pixels detected in the ROI image. Please check the image content and color thresholds.")
             logging.warning("No red pixels detected in ROI image.")
             return []
 
@@ -323,7 +320,7 @@ def extract_rois_from_image(roi_image_path, target_shape):
         props = regionprops(labeled_rois)
 
         if not props:
-            messagebox.showwarning("ROI Detection Failed", "No distinct red regions (ROIs) found in the image.")
+            sg.popup_ok("ROI Detection Failed", "No distinct red regions (ROIs) found in the image.")
             logging.warning("No distinct red regions found in ROI image.")
             return []
 
@@ -344,7 +341,7 @@ def extract_rois_from_image(roi_image_path, target_shape):
         return extracted_rois
 
     except Exception as e:
-        messagebox.showerror("ROI Image Error", f"Failed to load or process ROI image: {e}")
+        sg.popup_error("ROI Image Error", f"Failed to load or process ROI image: {e}")
         logging.error(f"Error extracting ROIs from image: {e}", exc_info=True)
         return []
 
@@ -355,6 +352,7 @@ def main():
     """
     logging.info("Starting 2D Image Thickness Measurement Application.")
 
+    # Restored initial variable declarations
     binary_image = None
     image_np_original = None  # Store original grayscale for potential overlay
     image_path = None
@@ -376,70 +374,74 @@ def main():
         'T12.1', 'T9', 'T4.3', 'T12.2', 'T4.4', 'T12.3', 'T12.4', 'T13', 'T5'
     ]
 
-    # Create a Tkinter root window but hide it
+    # Create a Tkinter root window but hide it (still needed for filedialogs)
     root = tk.Tk()
     root.withdraw()  # Hide the main window
 
-    # --- Get Basename for Plot Title ---
-    plot_basename = simpledialog.askstring(
-        "Plot Title Basename",
-        "Enter a basename for the plot title (e.g., 'Sample A-1'):",
-        parent=root
-    )
-    if plot_basename is None:  # User cancelled
-        plot_basename = "Untitled"
-        messagebox.showinfo("Plot Title", "No basename entered. Using 'Untitled'.")
+    # --- PySimpleGUI for Initial Parameter Input ---
+    sg.theme('LightBlue3')  # Set a theme for better aesthetics
 
-    # --- Step 1: Get Distance Per Pixel from User ---
+    layout = [
+        [sg.Text('Initial Setup Parameters', font=('Helvetica', 14, 'bold'))],
+        [sg.Frame('Plot and Calibration', [
+            [sg.Text('Plot Basename:'), sg.InputText(default_text='Untitled', key='-PLOT_BASENAME-')],
+            [sg.Text('Pixels per mm:'),
+             sg.InputText(default_text=str(default_distance_per_pixel), key='-PIXELS_PER_MM-')],
+        ])],
+        [sg.Frame('Canny Edge Detection Parameters', [
+            [sg.Text('Sigma:'), sg.InputText(default_text=str(default_canny_sigma), key='-CANNY_SIGMA-')],
+            [sg.Text('Low Threshold:'),
+             sg.InputText(default_text=str(default_canny_low_threshold), key='-CANNY_LOW_THRESH-')],
+            [sg.Text('High Threshold:'),
+             sg.InputText(default_text=str(default_canny_high_threshold), key='-CANNY_HIGH_THRESH-')],
+        ])],
+        [sg.Button('Start Processing', size=(15, 1)), sg.Button('Cancel', size=(15, 1))]
+    ]
+
+    window = sg.Window('MicroCT Thickness App Setup', layout, finalize=True)
+
+    event, values = window.read()
+    window.close()
+
+    if event == sg.WIN_CLOSED or event == 'Cancel':
+        sg.popup_ok("Setup Cancelled", "Application setup cancelled. Exiting.")
+        root.destroy()
+        return
+
+    # Parse values from PySimpleGUI window
+    plot_basename = values['-PLOT_BASENAME-'] if values['-PLOT_BASENAME-'] else "Untitled"
+
     try:
-        distance_per_pixel = get_float_input(
-            "Input Calibration",
-            f"Enter the pixels per mm (e.g., pixels/mm).\n"
-            f"Default value: {default_distance_per_pixel}",
-            default_distance_per_pixel,
-            root
-        )
+        distance_per_pixel = float(values['-PIXELS_PER_MM-'])
+    except ValueError:
+        sg.popup_ok("Input Error",
+                    f"Invalid Pixels per mm '{values['-PIXELS_PER_MM-']}'. Using default: {default_distance_per_pixel}")
+        distance_per_pixel = default_distance_per_pixel
 
-        if distance_per_pixel is None:  # User clicked Cancel
-            messagebox.showinfo("Calibration Cancelled",
-                                "No distance per pixel entered. Calculations will be in pixels.")
-            distance_per_pixel = 1.0
-            unit_label = "pixels"
-        else:
-            unit_label = "mm"  # Assuming mm as the desired output unit
-            logging.info(f"Distance per pixel set to: {distance_per_pixel} {unit_label}")
+    try:
+        canny_sigma = float(values['-CANNY_SIGMA-'])
+    except ValueError:
+        sg.popup_ok("Input Error",
+                    f"Invalid Canny Sigma '{values['-CANNY_SIGMA-']}'. Using default: {default_canny_sigma}")
+        canny_sigma = default_canny_sigma
 
-    except Exception as e:
-        messagebox.showerror("Input Error", f"An error occurred while getting distance per pixel: {e}")
-        logging.error(f"Error getting distance per pixel: {e}", exc_info=True)
-        distance_per_pixel = 1.0
-        unit_label = "pixels"
+    try:
+        canny_low_threshold = float(values['-CANNY_LOW_THRESH-'])
+    except ValueError:
+        sg.popup_ok("Input Error",
+                    f"Invalid Canny Low Threshold '{values['-CANNY_LOW_THRESH-']}'. Using default: {default_canny_low_threshold}")
+        canny_low_threshold = default_canny_low_threshold
 
-    # --- Step 2: Get Canny Edge Detection Parameters from User ---
-    canny_sigma = get_float_input(
-        "Canny Parameters",
-        f"Enter the Sigma value for Canny edge detection (smoothing).\n"
-        f"Default: {default_canny_sigma}",
-        default_canny_sigma,
-        root
-    )
+    try:
+        canny_high_threshold = float(values['-CANNY_HIGH_THRESH-'])
+    except ValueError:
+        sg.popup_ok("Input Error",
+                    f"Invalid Canny High Threshold '{values['-CANNY_HIGH_THRESH-']}'. Using default: {default_canny_high_threshold}")
+        canny_high_threshold = default_canny_high_threshold
 
-    canny_low_threshold = get_float_input(
-        "Canny Parameters",
-        f"Enter the Low Threshold for Canny edge detection (hysteresis).\n"
-        f"Default: {default_canny_low_threshold}",
-        default_canny_low_threshold,
-        root
-    )
-
-    canny_high_threshold = get_float_input(
-        "Canny Parameters",
-        f"Enter the High Threshold for Canny edge detection (hysteresis).\n"
-        f"Default: {default_canny_high_threshold}",
-        default_canny_high_threshold,
-        root
-    )
-
+    unit_label = "mm" if distance_per_pixel != 1.0 else "pixels"
+    logging.info(f"Plot Basename: {plot_basename}")
+    logging.info(f"Distance per pixel: {distance_per_pixel} {unit_label}")
     canny_params = {
         'sigma': canny_sigma,
         'low_threshold': canny_low_threshold,
@@ -447,68 +449,156 @@ def main():
     }
     logging.info(f"Final Canny parameters for processing: {canny_params}")
 
-    # --- Step 3: Select Main Image for Analysis (single image) ---
+    # --- Step 3: Select Main Image(s) for Analysis ---
     try:
-        image_path = filedialog.askopenfilename(  # Reverted to single file selection
-            title="Select the .bmp image file for analysis",
+        image_paths = filedialog.askopenfilenames(
+            title="Select .bmp image file(s) for analysis",
             filetypes=[("BMP files", "*.bmp"), ("All files", "*.*")],
-            parent=root
+            parent=root  # Use the hidden Tkinter root for filedialog
         )
     except Exception as e:
-        messagebox.showerror("File Selection Error", f"An error occurred during file selection: {e}")
+        sg.popup_error("File Selection Error", f"An error occurred during file selection: {e}")
         logging.error(f"Error during file dialog: {e}", exc_info=True)
         root.destroy()
         return
 
-    if not image_path:  # If user cancelled file selection
-        messagebox.showinfo("No Image Selected", "No image file was selected. Exiting application.")
+    if not image_paths:
+        sg.popup_ok("No Images Selected", "No image files were selected. Exiting application.")
         root.destroy()
         return
 
-    # --- Step 4: Select ROI Image ---
-    # This prompt is now outside the batch loop and will be asked once.
-    roi_image_path = None  # Initialize outside the try block
-    try:
-        roi_image_path = filedialog.askopenfilename(
-            title="Select a transparent image with red boxes for ROIs (e.g., .png) or cancel to skip",
-            filetypes=[("PNG files", "*.png"), ("BMP files", "*.bmp"), ("All files", "*.*")],
-            parent=root
-        )
-    except Exception as e:
-        messagebox.showerror("ROI Image Selection Error", f"An error occurred during ROI image selection: {e}")
-        logging.error(f"Error during ROI image dialog: {e}", exc_info=True)
-        # roi_image_path remains None if an error occurs
+    # --- Step 4: Select Output Directory ---
+    output_directory = filedialog.askdirectory(
+        title="Select Output Directory for Processed Images and Data",
+        parent=root  # Use the hidden Tkinter root for filedialog
+    )
+    if not output_directory:
+        sg.popup_ok("No Output Directory", "No output directory selected. Exiting application.")
+        root.destroy()
+        return
+
+    processed_images_dir = os.path.join(output_directory, 'processed-images')
+    os.makedirs(processed_images_dir, exist_ok=True)
+    logging.info(f"Processed images will be saved to: {processed_images_dir}")
 
     # Destroy the Tkinter root window after all dialogs
     root.destroy()
 
-    # --- Load and Process Main Image ---
-    binary_image = None
-    image_np_original = None
+    # --- Global ROI and Label Setup (asked once) ---
+    global_rois = []
+    global_custom_labels = []
 
-    if not image_path.lower().endswith('.bmp'):
-        messagebox.showwarning("File Type Warning",
-                               f"File '{os.path.basename(image_path)}' is not a .bmp file. Attempting to load anyway.")
-        logging.warning(
-            f"Warning: File '{image_path}' is not a .bmp file. Attempting to load anyway, but .bmp is expected.")
+    # Attempt to load the first image to get its shape for ROI processing
+    first_image_path = image_paths[0]
+    first_binary_image = None
     try:
-        logging.info(f"Attempting to load main image from: {image_path}")
-        image_np = io.imread(image_path)
+        temp_image_np = io.imread(first_image_path)
+        if temp_image_np.ndim == 3:
+            temp_image_np = color.rgb2gray(temp_image_np)
+        first_binary_image = binary_fill_holes(canny(temp_image_np, sigma=canny_params['sigma'],
+                                                     low_threshold=canny_params['low_threshold'],
+                                                     high_threshold=canny_params['high_threshold']))
+        if not np.any(first_binary_image):
+            sg.popup_ok("First Image Warning",
+                        "No object detected in the first image for ROI reference. ROIs will be skipped for all images.")
+            first_binary_image = None  # Treat as if loading failed for ROI purposes
+    except Exception as e:
+        sg.popup_error("First Image Load Error",
+                       f"Failed to load first image for ROI reference: {e}\nROIs will be skipped for all images.")
+        first_binary_image = None
 
-        # Convert to grayscale if it's an RGB image
-        if image_np.ndim == 3:
-            logging.info("Converting RGB image to grayscale.")
-            image_np = color.rgb2gray(image_np)
-        elif image_np.ndim != 2:
-            messagebox.showerror("Image Dimension Error",
-                                 f"Unsupported image dimensions: {image_np.ndim}. Expected 2D or 3D (RGB). Using synthetic object.")
-            logging.error(
-                f"Unsupported image dimensions: {image_np.ndim}. Expected 2D or 3D (RGB). Using synthetic object.")
-            binary_image = create_synthetic_2d_object(shape=(200, 200), object_type='ring').astype(bool)
-            image_np_original = binary_image  # Use synthetic as original for overlay
-            image_path = "synthetic_object.bmp"  # Update path for title
+    if first_binary_image is not None:
+        # Prompt for ROI image using a custom PySimpleGUI window
+        roi_selection_layout = [
+            [sg.Text('Select ROI Image', font=('Helvetica', 14, 'bold'))],
+            [sg.Text(
+                'Please select ONE transparent image (e.g., PNG) containing red boxes to define Regions of Interest.')],
+            [sg.Text('ROI Image Path:'), sg.Input(key='-ROI_FILE_PATH-', enable_events=True, disabled=True),
+             sg.FileBrowse('Browse for ROI Image',
+                           file_types=(("PNG Files", "*.png"), ("BMP Files", "*.bmp"), ("All Files", "*.*")))],
+            [sg.Button('Select ROI Image', size=(18, 1)), sg.Button('Skip ROIs', size=(15, 1))]
+        ]
+        roi_selection_window = sg.Window('ROI Image Selection', roi_selection_layout, finalize=True)
 
-        if binary_image is None:  # Only proceed if no error or synthetic object already created
+        roi_image_path = None
+        while True:
+            roi_event, roi_values = roi_selection_window.read()
+            if roi_event == sg.WIN_CLOSED or roi_event == 'Skip ROIs':
+                sg.popup_ok("ROI Selection Skipped",
+                            "No ROI image selected. Proceeding without specific ROI analysis for all images.")
+                break  # Exit loop, roi_image_path remains None
+            elif roi_event == 'Select ROI Image':
+                selected_path = roi_values['-ROI_FILE_PATH-']
+                if selected_path:
+                    roi_image_path = selected_path
+                    break  # Valid path selected, exit loop
+                else:
+                    sg.popup_ok("No File Selected", "Please select an ROI image or click 'Skip ROIs'.")
+            elif roi_event == '-ROI_FILE_PATH-':  # Event from FileBrowse button updating the Input field
+                # The Input field has been updated by FileBrowse, but the user still needs to click 'Select ROI Image'
+                pass  # Do nothing, just wait for a button click
+
+        roi_selection_window.close()
+
+        if roi_image_path:  # Only proceed if a path was actually selected
+            global_rois = extract_rois_from_image(roi_image_path, first_binary_image.shape)
+            if not global_rois:
+                sg.popup_ok("ROI Warning",
+                            f"No valid ROIs extracted from '{os.path.basename(roi_image_path)}'. Proceeding without specific ROI analysis for all images.")
+            else:
+                # Prompt for custom labels if ROIs were found
+                use_hardcoded = sg.popup_yes_no(
+                    "Custom ROI Labels",
+                    "Do you want to use the 'v1 transparent' hardcoded labels?\n"
+                    "Click 'Yes' for hardcoded, 'No' to enter custom labels."
+                ) == 'Yes'
+
+                if use_hardcoded:
+                    global_custom_labels = V1_TRANSPARENT_LABELS
+                    logging.info(f"Using 'v1 transparent' hardcoded labels: {global_custom_labels}")
+                else:
+                    label_input = sg.popup_get_text(
+                        "Custom ROI Labels",
+                        f"Enter {len(global_rois)} custom labels for your ROIs, separated by commas.\n"
+                        f"Example: Top, Left, Bottom, Right, ...",
+                        default_text=""
+                    )
+                    if label_input:
+                        global_custom_labels = [label.strip() for label in label_input.split(',')]
+                        logging.info(f"Custom labels entered: {global_custom_labels}")
+                    else:
+                        logging.info("No custom labels entered.")
+        # If roi_image_path is None (due to skip or no selection), global_rois and global_custom_labels remain empty.
+    else:
+        sg.popup_ok("ROI Processing Skipped",
+                    "First image could not be processed for ROI reference. Proceeding without specific ROI analysis for all images.")
+
+    # --- Initialize list to store all samples' ROI data for Excel output ---
+    all_samples_excel_data = []
+    all_unique_roi_labels = set()  # To collect all unique ROI labels across all images
+
+    # --- Process each selected image ---
+    for sample_index, image_path in enumerate(image_paths):
+        logging.info(f"\n--- Processing Sample {sample_index + 1}: {os.path.basename(image_path)} ---")
+
+        binary_image = None
+        image_np_original = None
+
+        try:
+            logging.info(f"Attempting to load main image from: {image_path}")
+            image_np = io.imread(image_path)
+
+            # Convert to grayscale if it's an RGB image
+            if image_np.ndim == 3:
+                logging.info("Converting RGB image to grayscale.")
+                image_np = color.rgb2gray(image_np)
+            elif image_np.ndim != 2:
+                sg.popup_error("Image Dimension Error",
+                               f"Unsupported image dimensions: {image_np.ndim}. Expected 2D or 3D (RGB). Skipping {os.path.basename(image_path)}.")
+                logging.error(
+                    f"Unsupported image dimensions: {image_np.ndim}. Skipping {os.path.basename(image_path)}.")
+                continue  # Skip to next image
+
             image_np_original = image_np  # Store original grayscale for overlay
 
             # --- Segmentation: Edge Detection and Hole Filling ---
@@ -521,162 +611,181 @@ def main():
 
             # Check if the binary image is empty after processing
             if not np.any(binary_image):
-                messagebox.showwarning("No Object Detected",
-                                       "No object was detected after edge detection and hole filling. "
-                                       "Please adjust Canny parameters or check your image. Using synthetic object.")
-                logging.warning("Binary image is empty after processing. Using synthetic object.")
-                binary_image = create_synthetic_2d_object(shape=(200, 200), object_type='ring').astype(bool)
-                image_np_original = binary_image  # Use synthetic as original for overlay
-                image_path = "synthetic_object.bmp"  # Update path for title
+                sg.popup_ok("No Object Detected",
+                            f"No object was detected in {os.path.basename(image_path)} after processing. Skipping this image.")
+                logging.warning(f"Binary image is empty for {os.path.basename(image_path)}. Skipping.")
+                continue  # Skip to next image
             else:
                 logging.info(f"Main image loaded, edge-detected, and binarized. Shape: {binary_image.shape}")
 
-    except Exception as e:
-        messagebox.showerror("Main Image Loading/Processing Error",
-                             f"Failed to load or process main image '{os.path.basename(image_path)}': {e}\nUsing synthetic object instead.")
-        logging.error(f"Failed to load or process main image '{os.path.basename(image_path)}': {e}", exc_info=True)
-        binary_image = create_synthetic_2d_object(shape=(200, 200), object_type='ring').astype(bool)
-        image_np_original = binary_image  # Use synthetic as original for overlay
-        image_path = "synthetic_object.bmp"  # Update path for title
+        except Exception as e:
+            sg.popup_error("Main Image Loading/Processing Error",
+                           f"Failed to load or process main image '{os.path.basename(image_path)}': {e}\nSkipping this image.")
+            logging.error(f"Failed to load or process main image '{os.path.basename(image_path)}': {e}", exc_info=True)
+            continue  # Skip to next image
 
-    # --- Extract ROIs from the selected ROI image ---
-    rois = []
-    if roi_image_path:
-        rois = extract_rois_from_image(roi_image_path, binary_image.shape)
-        if not rois:
-            messagebox.showwarning("ROI Warning",
-                                   "No valid ROIs extracted from the provided ROI image. Proceeding without specific ROI analysis.")
-            logging.warning("No valid ROIs extracted from ROI image.")
+        try:
+            # Ensure the binary image is boolean type for EDT
+            binary_image = binary_image.astype(bool)
 
-    if not rois:  # If no ROIs are found, provide a fallback message
-        messagebox.showinfo("No ROIs Defined",
-                            "No custom ROI image provided or valid ROIs found. Proceeding with overall thickness statistics only.")
-        logging.info("No ROIs defined, proceeding with overall thickness statistics.")
+            # --- Measure Thickness (2D Width/Diameter) ---
+            thickness_map = measure_thickness_edt(binary_image)
 
-    # --- Get Custom ROI Labels (if ROIs were found) ---
-    custom_labels = []
-    if rois:
-        # Use messagebox.askyesno to act as a toggle, then simpledialog for input
-        use_hardcoded = messagebox.askyesno(
-            "Custom ROI Labels",
-            "Do you want to use the 'v1 transparent' hardcoded labels?\n"
-            "Click 'Yes' for hardcoded, 'No' to enter custom labels."
-        )
+            # --- Analyze and Collect Results for Excel ---
+            current_sample_excel_row = {'Sample #': sample_index + 1}  # Start sample number from 1
 
-        if use_hardcoded:
-            custom_labels = V1_TRANSPARENT_LABELS
-            logging.info(f"Using 'v1 transparent' hardcoded labels: {custom_labels}")
-        else:
-            label_input = simpledialog.askstring(
-                "Custom ROI Labels",
-                f"Enter {len(rois)} custom labels for your ROIs, separated by commas.\n"
-                f"Example: Top, Left, Bottom, Right, ...",
-                parent=None
-            )
-            if label_input:
-                custom_labels = [label.strip() for label in label_input.split(',')]
-                logging.info(f"Custom labels entered: {custom_labels}")
-            else:
-                logging.info("No custom labels entered.")
+            if global_rois:  # Use the globally defined ROIs
+                logging.info(f"\n--- Thickness Statistics for {len(global_rois)} Image-Defined Rectangular ROIs ---")
 
-    try:
-        # Ensure the binary image is boolean type for EDT
-        binary_image = binary_image.astype(bool)
+                roi_stats_for_viz = []  # Data for visualization
 
-        # --- Measure Thickness (2D Width/Diameter) ---
-        thickness_map = measure_thickness_edt(binary_image)
+                for i, (x_min, y_min, width, height) in enumerate(global_rois):
+                    logging.info(f"  Processing ROI {i + 1} (x:{x_min}, y:{y_min}, w:{width}, h:{height}):")
 
-        # --- Analyze and Collect Results ---
-        # For single image, we don't need all_samples_excel_data or all_unique_roi_labels directly
-        # But we still need roi_stats_for_viz for plotting
+                    # Ensure ROI coordinates are within the current image dimensions
+                    # This is important if image sizes vary slightly in the batch
+                    current_x_min = max(0, x_min)
+                    current_y_min = max(0, y_min)
+                    current_x_max = min(binary_image.shape[1], x_min + width)
+                    current_y_max = min(binary_image.shape[0], y_min + height)
 
-        if rois:
-            logging.info(f"\n--- Thickness Statistics for {len(rois)} Image-Defined Rectangular ROIs ---")
+                    # Adjust width and height based on clipped coordinates
+                    current_width = current_x_max - current_x_min
+                    current_height = current_y_max - current_y_min
 
-            roi_stats_for_viz = []  # Data for visualization
+                    if current_width <= 0 or current_height <= 0:
+                        logging.warning(f"    ROI {i + 1} is outside or too small for current image. Skipping.")
+                        roi_stats_for_viz.append({'coords': (x_min, y_min, width, height),  # Store original coords
+                                                  'mean': np.nan, 'median': np.nan, 'std': np.nan,
+                                                  'custom_label': global_custom_labels[i] if i < len(
+                                                      global_custom_labels) else f"ROI_{i + 1}"})
+                        current_sample_excel_row[global_custom_labels[i] if i < len(
+                            global_custom_labels) else f"ROI_{i + 1}"] = np.nan  # Record NaN for Excel
+                        continue
 
-            for i, (x_min, y_min, width, height) in enumerate(rois):
-                logging.info(f"  Processing ROI {i + 1} (x:{x_min}, y:{y_min}, w:{width}, h:{height}):")
+                    roi_binary_segment = binary_image[current_y_min: current_y_max, current_x_min: current_x_max]
 
-                roi_binary_segment = binary_image[y_min: y_min + height, x_min: x_min + width]
+                    current_custom_label = global_custom_labels[i] if i < len(global_custom_labels) else f"ROI_{i + 1}"
+                    all_unique_roi_labels.add(current_custom_label)  # Add to set of all labels
 
-                current_custom_label = custom_labels[i] if i < len(custom_labels) else f"ROI_{i + 1}"
+                    if not np.any(roi_binary_segment):
+                        logging.info(
+                            f"    ROI {i + 1}: No object pixels in this region. Skipping directional measurement.")
+                        roi_stats_for_viz.append({'coords': (x_min, y_min, width, height),
+                                                  'mean': np.nan, 'median': np.nan, 'std': np.nan,
+                                                  'custom_label': current_custom_label})
+                        current_sample_excel_row[current_custom_label] = np.nan  # Record NaN for Excel
+                        continue
 
-                if not np.any(roi_binary_segment):
-                    logging.info(f"    ROI {i + 1}: No object pixels in this region. Skipping directional measurement.")
-                    roi_stats_for_viz.append({'coords': (x_min, y_min, width, height),
-                                              'mean': np.nan, 'median': np.nan, 'std': np.nan,
-                                              'custom_label': current_custom_label})
-                    continue
+                    directional_measurements = []
+                    if current_width > current_height:  # Horizontal ROI, measure X distances
+                        for r_idx in range(roi_binary_segment.shape[0]):
+                            row_pixels = roi_binary_segment[r_idx, :]
+                            true_cols = np.where(row_pixels)[0]
+                            if true_cols.size > 0:
+                                distance = true_cols.max() - true_cols.min() + 1
+                                directional_measurements.append(distance)
+                    else:  # Vertical ROI (height >= width), measure Y distances
+                        for c_idx in range(roi_binary_segment.shape[1]):
+                            col_pixels = roi_binary_segment[:, c_idx]
+                            true_rows = np.where(col_pixels)[0]
+                            if true_rows.size > 0:
+                                distance = true_rows.max() - true_rows.min() + 1
+                                directional_measurements.append(distance)
 
-                directional_measurements = []
-                if width > height:  # Horizontal ROI, measure X distances
-                    for r_idx in range(roi_binary_segment.shape[0]):
-                        row_pixels = roi_binary_segment[r_idx, :]
-                        true_cols = np.where(row_pixels)[0]
-                        if true_cols.size > 0:
-                            distance = true_cols.max() - true_cols.min() + 1
-                            directional_measurements.append(distance)
-                else:  # Vertical ROI (height >= width), measure Y distances
-                    for c_idx in range(roi_binary_segment.shape[1]):
-                        col_pixels = roi_binary_segment[:, c_idx]
-                        true_rows = np.where(col_pixels)[0]
-                        if true_rows.size > 0:
-                            distance = true_rows.max() - true_rows.min() + 1
-                            directional_measurements.append(distance)
+                    if directional_measurements:
+                        calibrated_measurements = np.array(directional_measurements) / distance_per_pixel
+                        mean_t = np.mean(calibrated_measurements)
+                        median_t = np.median(calibrated_measurements)
+                        std_t = np.std(calibrated_measurements)
 
-                if directional_measurements:
-                    calibrated_measurements = np.array(directional_measurements) / distance_per_pixel
-                    mean_t = np.mean(calibrated_measurements)
-                    median_t = np.median(calibrated_measurements)
-                    std_t = np.std(calibrated_measurements)
+                        logging.info(
+                            f"    Min: {np.min(calibrated_measurements):.2f} {unit_label}, Max: {np.max(calibrated_measurements):.2f} {unit_label}, Mean: {mean_t:.2f} {unit_label}, Median: {median_t:.2f} {unit_label}, StdDev: {std_t:.2f} {unit_label}")
 
+                        roi_stats_for_viz.append({'coords': (x_min, y_min, width, height),
+                                                  'mean': mean_t, 'median': median_t, 'std': std_t,
+                                                  'custom_label': current_custom_label})
+                        current_sample_excel_row[current_custom_label] = median_t  # Record median for Excel
+                    else:
+                        logging.info(f"    ROI {i + 1}: No valid directional measurements found. Skipping.")
+                        roi_stats_for_viz.append({'coords': (x_min, y_min, width, height),
+                                                  'mean': np.nan, 'median': np.nan, 'std': np.nan,
+                                                  'custom_label': current_custom_label})
+                        current_sample_excel_row[current_custom_label] = np.nan  # Record NaN for Excel
+
+                all_samples_excel_data.append(current_sample_excel_row)
+
+            else:  # Fallback to overall EDT statistics if no ROIs were defined globally
+                logging.info("\n--- Overall Thickness Statistics (No specific ROIs defined) ---")
+                thickness_map_calibrated_overall = thickness_map / distance_per_pixel
+                foreground_thickness_values = thickness_map_calibrated_overall[binary_image]
+
+                overall_median = np.nan
+                if foreground_thickness_values.size > 0:
+                    overall_median = np.median(foreground_thickness_values)
                     logging.info(
-                        f"    Min: {np.min(calibrated_measurements):.2f} {unit_label}, Max: {np.max(calibrated_measurements):.2f} {unit_label}, Mean: {mean_t:.2f} {unit_label}, Median: {median_t:.2f} {unit_label}, StdDev: {std_t:.2f} {unit_label}")
-
-                    roi_stats_for_viz.append({'coords': (x_min, y_min, width, height),
-                                              'mean': mean_t, 'median': median_t, 'std': std_t,
-                                              'custom_label': current_custom_label})
+                        f"Overall Minimum thickness (2D): {np.min(foreground_thickness_values):.2f} {unit_label}")
+                    logging.info(
+                        f"Overall Maximum thickness (2D): {np.max(foreground_thickness_values):.2f} {unit_label}")
+                    logging.info(
+                        f"Overall Average thickness (2D): {np.mean(foreground_thickness_values):.2f} {unit_label}")
+                    logging.info(f"Overall Median thickness (2D): {overall_median:.2f} {unit_label}")
+                    logging.info(
+                        f"Overall Standard deviation of thickness (2D): {np.std(foreground_thickness_values):.2f} {unit_label}")
                 else:
-                    logging.info(f"    ROI {i + 1}: No valid directional measurements found. Skipping.")
-                    roi_stats_for_viz.append({'coords': (x_min, y_min, width, height),
-                                              'mean': np.nan, 'median': np.nan, 'std': np.nan,
-                                              'custom_label': current_custom_label})
+                    logging.warning("No foreground pixels detected for overall statistics.")
 
-        else:  # Fallback to overall EDT statistics if no ROIs were defined
-            logging.info("\n--- Overall Thickness Statistics (No specific ROIs defined) ---")
-            thickness_map_calibrated_overall = thickness_map / distance_per_pixel
-            foreground_thickness_values = thickness_map_calibrated_overall[binary_image]
+                # For overall stats, add a generic "Overall_Median" label to Excel data
+                current_sample_excel_row['Overall_Median'] = overall_median
+                all_unique_roi_labels.add('Overall_Median')
+                all_samples_excel_data.append(current_sample_excel_row)
 
-            if foreground_thickness_values.size > 0:
-                logging.info(f"Overall Minimum thickness (2D): {np.min(foreground_thickness_values):.2f} {unit_label}")
-                logging.info(f"Overall Maximum thickness (2D): {np.max(foreground_thickness_values):.2f} {unit_label}")
-                logging.info(f"Overall Average thickness (2D): {np.mean(foreground_thickness_values):.2f} {unit_label}")
-                logging.info(
-                    f"Overall Median thickness (2D): {np.median(foreground_thickness_values):.2f} {unit_label}")
-                logging.info(
-                    f"Overall Standard deviation of thickness (2D): {np.std(foreground_thickness_values):.2f} {unit_label}")
-            else:
-                logging.warning("No foreground pixels detected for overall statistics.")
+            # --- Save the processed image plot ---
+            output_filename = os.path.splitext(os.path.basename(image_path))[0] + "-processed.png"
+            plot_save_path = os.path.join(processed_images_dir, output_filename)
 
-            roi_stats_for_viz = None  # No specific ROIs to visualize
+            visualize_thickness_2d(thickness_map / distance_per_pixel,  # Pass calibrated map for visualization
+                                   original_image_for_overlay=image_np_original,
+                                   unit_label=unit_label, roi_data=roi_stats_for_viz,
+                                   distance_per_pixel_for_drawing=distance_per_pixel,
+                                   plot_basename=plot_basename,
+                                   original_filename=image_path,
+                                   canny_params=canny_params,
+                                   save_path=plot_save_path)  # Pass save_path here
 
-        # --- Visualize the processed image plot ---
-        visualize_thickness_2d(thickness_map / distance_per_pixel,  # Pass calibrated map for visualization
-                               original_image_for_overlay=image_np_original,
-                               unit_label=unit_label, roi_data=roi_stats_for_viz,
-                               distance_per_pixel_for_drawing=distance_per_pixel,
-                               plot_basename=plot_basename,
-                               original_filename=image_path,
-                               canny_params=canny_params)
+        except Exception as e:
+            sg.popup_error("Processing Error",
+                           f"An error occurred during thickness measurement or visualization for '{os.path.basename(image_path)}': {e}\nSkipping this image.")
+            logging.error(
+                f"An error occurred during thickness measurement or visualization for '{os.path.basename(image_path)}': {e}",
+                exc_info=True)
+            continue  # Skip to next image
 
-    except Exception as e:
-        messagebox.showerror("Processing Error",
-                             f"An error occurred during thickness measurement or visualization: {e}")
-        logging.error(f"An error occurred during thickness measurement or visualization: {e}", exc_info=True)
+    # --- Compile and Save Excel Data ---
+    if all_samples_excel_data:
+        # Ensure all ROI labels are present in each row, filling with NaN if missing
+        sorted_roi_labels = sorted(list(all_unique_roi_labels))
+        # Ensure 'Sample #' is the first column
+        excel_columns = ['Sample #'] + sorted_roi_labels
+
+        df = pd.DataFrame(all_samples_excel_data, columns=excel_columns)
+
+        excel_output_path = os.path.join(output_directory, f"{plot_basename}_thickness_data.xlsx")
+        try:
+            df.to_excel(excel_output_path, index=False)
+            sg.popup_ok("Processing Complete", f"All images processed and data saved to:\n{excel_output_path}\n"
+                                               f"Processed images saved to:\n{processed_images_dir}")
+            logging.info(f"Excel data saved to: {excel_output_path}")
+        except Exception as e:
+            sg.popup_error("Excel Save Error", f"Failed to save Excel file: {e}")
+            logging.error(f"Error saving Excel file: {e}", exc_info=True)
+    else:
+        sg.popup_ok("No Data Processed", "No valid image data was processed to compile for Excel.")
+        logging.warning("No data collected for Excel output.")
 
     logging.info("2D Image Thickness Measurement Application finished.")
 
+#try to improve the accuracy of distance selection, perhaps max distance is better, cleaning up the RIO image may help this along with better contrast
 
 if __name__ == "__main__":
     main()
