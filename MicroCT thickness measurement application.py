@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_fill_holes
 from skimage.morphology import disk
-from skimage import io, color
+from skimage import io, color, exposure
 from skimage.feature import canny
 from skimage.measure import label, regionprops
 import matplotlib.pyplot as plt
@@ -10,8 +10,8 @@ import logging
 import os
 import tkinter as tk
 from tkinter import filedialog, messagebox
-import PySimpleGUI as sg  # Import PySimpleGUI
-import pandas as pd  # Import pandas for Excel output
+import PySimpleGUI as sg
+import pandas as pd
 
 # Configure logging for better feedback
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -94,7 +94,7 @@ def measure_thickness_edt(binary_image):
 
 def visualize_thickness_2d(thickness_map, original_image_for_overlay=None, unit_label="pixels",
                            roi_data=None, distance_per_pixel_for_drawing=1.0, plot_basename="2D Thickness Map",
-                           original_filename="", canny_params=None, save_path=None):
+                           original_filename="", canny_params=None, exposure_params=None, save_path=None):
     """
     Visualizes the 2D thickness map. Optionally overlays the original image and ROI boxes.
     Saves the plot to save_path if provided, otherwise displays it.
@@ -105,10 +105,12 @@ def visualize_thickness_2d(thickness_map, original_image_for_overlay=None, unit_
                                                         to overlay for context.
         unit_label (str): The label for the units (e.g., "pixels", "mm").
         roi_data (list, optional): A list of dictionaries, each containing ROI coords, stats, and custom label.
-        distance_per_pixel_for_drawing (float): The pixels/mm value used to convert mean_t (in mm) back to pixels for drawing.
+                                   Expected to contain 'value', 'std', 'max_t_start_plot_xy', 'max_t_end_plot_xy', 'metric_type'.
+        distance_per_pixel_for_drawing (float): The pixels/mm value used to convert max_t (in mm) back to pixels for drawing.
         plot_basename (str): The user-defined basename for the plot title.
         original_filename (str): The filename of the original image.
         canny_params (dict, optional): Dictionary containing 'sigma', 'low_threshold', 'high_threshold'.
+        exposure_params (dict, optional): Dictionary containing 'method' and 'gamma' (if method is gamma).
         save_path (str, optional): Full path to save the plot. If None, the plot is displayed.
     """
     if thickness_map.ndim != 2:
@@ -118,9 +120,7 @@ def visualize_thickness_2d(thickness_map, original_image_for_overlay=None, unit_
     logging.info(f"Visualizing 2D thickness map in {unit_label}.")
 
     # Set figure size for 2000x1000 resolution at 100 dpi
-    # 2000 pixels / 100 dpi = 20 inches
-    # 1000 pixels / 100 dpi = 10 inches
-    fig, ax = plt.subplots(1, 1, figsize=(20, 10))  # Changed figsize to (20, 10)
+    fig, ax = plt.subplots(1, 1, figsize=(20, 10))
 
     # Apply vertical flip to both images for correct orientation
     flipped_thickness_map = np.flipud(thickness_map)
@@ -134,15 +134,22 @@ def visualize_thickness_2d(thickness_map, original_image_for_overlay=None, unit_
     else:
         im = ax.imshow(flipped_thickness_map, cmap='viridis', origin='lower')
 
-    # Draw ROI boxes and mean lines/text if provided
+    # Draw ROI boxes and max distance lines/text if provided
     if roi_data:
         height_img = thickness_map.shape[0]  # Get original image height for y-flip
         for i, roi_info in enumerate(roi_data):
             x_min, y_min, width, height = roi_info['coords']
-            mean_t = roi_info['mean']
-            median_t = roi_info['median']
+            metric_value = roi_info['value']  # This will be max_t or min_t
             std_t = roi_info['std']
-            custom_label = roi_info.get('custom_label', '')  # Get custom label, default to empty string
+            custom_label = roi_info.get('custom_label', '')
+            metric_type = roi_info.get('metric_type', 'MAX')  # 'MAX' or 'MIN'
+
+            # Retrieve the specific start and end points for the max thickness line
+            max_t_start_plot_xy = roi_info.get('max_t_start_plot_xy')
+            max_t_end_plot_xy = roi_info.get('max_t_end_plot_xy')
+            # For MIN, we need min_t_start_plot_xy, min_t_end_plot_xy
+            min_t_start_plot_xy = roi_info.get('min_t_start_plot_xy')
+            min_t_end_plot_xy = roi_info.get('min_t_end_plot_xy')
 
             # Adjust y_min for origin='lower' plotting
             rect_y_min_flipped = height_img - (y_min + height)
@@ -153,55 +160,50 @@ def visualize_thickness_2d(thickness_map, original_image_for_overlay=None, unit_
             ax.add_patch(rect)
 
             # Add ROI number label to the top-left corner
-            text_x_roi_num = x_min + 5  # Small offset from left edge
-            text_y_roi_num = rect_y_min_flipped + height - 5  # Small offset from top edge
+            text_x_roi_num = x_min + 5
+            text_y_roi_num = rect_y_min_flipped + height - 5
             ax.text(text_x_roi_num, text_y_roi_num, str(i + 1), color='white', fontsize=8, ha='left', va='top',
                     bbox=dict(facecolor='black', alpha=0.5, edgecolor='none', boxstyle='round,pad=0.2'))
 
-            # Draw mean distance line with arrows
-            line_color = 'yellow'
+            # Draw the appropriate line (MAX or MIN)
+            line_color = 'yellow' if metric_type == 'MAX' else 'cyan'
             line_style = ':'
             line_width = 1.5
             arrow_style = '<->'
 
-            # Convert mean_t (in mm) back to pixels for drawing on the image
-            mean_t_pixels = mean_t * distance_per_pixel_for_drawing
-
-            if width > height:  # Horizontal ROI, draw horizontal line
-                line_y = rect_y_min_flipped + height / 2
-                line_start_x = x_min + (width / 2) - (mean_t_pixels / 2)
-                line_end_x = x_min + (width / 2) + (mean_t_pixels / 2)
-                ax.annotate('', xy=(line_end_x, line_y), xytext=(line_start_x, line_y),
+            if metric_type == 'MAX' and max_t_start_plot_xy and max_t_end_plot_xy:
+                ax.annotate('', xy=max_t_end_plot_xy, xytext=max_t_start_plot_xy,
                             arrowprops=dict(arrowstyle=arrow_style, color=line_color, lw=line_width, ls=line_style))
-            else:  # Vertical ROI, draw vertical line
-                line_x = x_min + width / 2
-                line_start_y = rect_y_min_flipped + (height / 2) - (mean_t_pixels / 2)
-                line_end_y = rect_y_min_flipped + (height / 2) + (mean_t_pixels / 2)
-                ax.annotate('', xy=(line_x, line_end_y), xytext=(line_x, line_start_y),
+            elif metric_type == 'MIN' and min_t_start_plot_xy and min_t_end_plot_xy:
+                ax.annotate('', xy=min_t_end_plot_xy, xytext=min_t_start_plot_xy,
                             arrowprops=dict(arrowstyle=arrow_style, color=line_color, lw=line_width, ls=line_style))
+            else:
+                logging.warning(
+                    f"No specific {metric_type} thickness coordinates found for ROI {i + 1}. Skipping arrow drawing.")
 
             # Write custom label with smart positioning
             if custom_label:
-                if width > height:  # Horizontal ROI, label to the right
-                    label_x = x_min + width + 5  # Offset to the right
+                # Adjust label positioning based on ROI aspect ratio, not arrow direction
+                if width > height:  # Horizontal ROI, horizontal arrow, label above ROI
+                    label_x = x_min + width / 2
+                    label_y = rect_y_min_flipped + height + 5
+                    ax.text(label_x, label_y, custom_label,
+                            color='blue', fontsize=8, ha='center', va='bottom',
+                            bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.1'))
+                else:  # Vertical ROI, vertical arrow, label to the right of ROI
+                    label_x = x_min + width + 5
                     label_y = rect_y_min_flipped + height / 2
                     ax.text(label_x, label_y, custom_label,
                             color='blue', fontsize=8, ha='left', va='center',
                             bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.1'))
-                else:  # Vertical ROI, label above
-                    label_x = x_min + width / 2
-                    label_y = rect_y_min_flipped + height + 5  # Offset above
-                    ax.text(label_x, label_y, custom_label,
-                            color='blue', fontsize=8, ha='center', va='bottom',
-                            bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.1'))
 
-            # Write Median and StdDev values
+            # Write Metric Value and StdDev values
             text_x_stats = x_min + width / 2
-            text_y_median = rect_y_min_flipped - 10  # Offset below the box
+            text_y_value = rect_y_min_flipped - 10  # Offset below the box
             text_y_stddev = rect_y_min_flipped - 25  # Further offset for StdDev
 
-            if not np.isnan(median_t):
-                ax.text(text_x_stats, text_y_median, f'Med: {median_t:.2f}{unit_label}',
+            if not np.isnan(metric_value):
+                ax.text(text_x_stats, text_y_value, f'{metric_type}: {metric_value:.2f}{unit_label}',
                         color='black', fontsize=7, ha='center', va='top',
                         bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.1'))
             if not np.isnan(std_t):
@@ -220,20 +222,20 @@ def visualize_thickness_2d(thickness_map, original_image_for_overlay=None, unit_
     x_tick_labels_mm = [f"{p / distance_per_pixel_for_drawing:.1f}" for p in x_ticks_px]
     ax.set_xticks(x_ticks_px)
     ax.set_xticklabels(x_tick_labels_mm)
-    ax.set_xlabel(f'X-axis ({unit_label})')  # Changed 'X-coordinate' to 'X-axis'
+    ax.set_xlabel(f'X-axis ({unit_label})')
 
     # For Y-axis
     y_ticks_px = np.linspace(0, img_height - 1, num=5, dtype=int)  # Example: 5 ticks
     y_tick_labels_mm = [f"{p / distance_per_pixel_for_drawing:.1f}" for p in y_ticks_px]
     ax.set_yticks(y_ticks_px)
     ax.set_yticklabels(y_tick_labels_mm)
-    ax.set_ylabel(f'Y-axis ({unit_label})')  # Changed 'Y-coordinate' to 'Y-axis'
+    ax.set_ylabel(f'Y-axis ({unit_label})')
 
     # Set the plot title with basename and filename
     title_text = f"{plot_basename}"
     if original_filename:
         title_text += f" ({os.path.basename(original_filename)})"
-    title_text += f" Radiography thickness dist. analysis"  # Changed '2D Thickness Map'
+    title_text += f" Radiography thickness dist. analysis"
     ax.set_title(title_text)
 
     # Add Canny parameters box to top-right corner
@@ -243,8 +245,6 @@ def visualize_thickness_2d(thickness_map, original_image_for_overlay=None, unit_
                       f"  Low Thresh: {canny_params['low_threshold']:.2f}\n"
                       f"  High Thresh: {canny_params['high_threshold']:.2f}")
 
-        # Position the text box in the top-right corner
-        # `transform=ax.transAxes` means coordinates are relative to the axes (0,0 to 1,1)
         ax.text(0.98, 0.98, param_text,
                 transform=ax.transAxes,
                 fontsize=8,
@@ -252,18 +252,66 @@ def visualize_thickness_2d(thickness_map, original_image_for_overlay=None, unit_
                 horizontalalignment='right',
                 bbox=dict(boxstyle='round,pad=0.5', fc='white', alpha=0.7, ec='gray'))
 
+    # Add Exposure parameters box (top-left for now, adjust as needed)
+    if exposure_params and exposure_params['method'] != 'None':
+        exposure_text = f"Exposure: {exposure_params['method']}"
+        if exposure_params['method'] == 'Gamma':
+            exposure_text += f" (Gamma: {exposure_params['gamma']:.2f})"
+        elif exposure_params['method'] == 'CLAHE':
+            exposure_text += f" (Clip Limit: {exposure_params.get('clip_limit', 'Default'):.2f})"
+
+        ax.text(0.02, 0.98, exposure_text,
+                transform=ax.transAxes,
+                fontsize=8,
+                verticalalignment='top',
+                horizontalalignment='left',
+                bbox=dict(boxstyle='round,pad=0.5', fc='white', alpha=0.7, ec='gray'))
+
     plt.tight_layout()
 
     if save_path:
-        plt.savefig(save_path, dpi=100)  # Explicitly set DPI to 100 for 2000x1000 pixels
-        plt.close(fig)  # Close the figure to free memory
+        plt.savefig(save_path, dpi=100)
+        plt.close(fig)
         logging.info(f"Plot saved to {save_path}")
     else:
         plt.show()
         logging.info("2D thickness map visualization complete.")
 
 
-# Removed get_float_input as we're using PySimpleGUI for all initial inputs
+def adjust_image_exposure(image_np, method='None', gamma=1.0, clip_limit=0.01):
+    """
+    Adjusts the exposure (brightness/contrast) of a grayscale image.
+
+    Args:
+        image_np (np.array): The input grayscale image (float type, range 0-1 preferred).
+        method (str): Exposure adjustment method ('None', 'Histogram Equalization', 'Gamma', 'CLAHE').
+        gamma (float): Gamma value for gamma correction.
+        clip_limit (float): Clip limit for CLAHE (Contrast Limited Adaptive Histogram Equalization).
+
+    Returns:
+        np.array: The adjusted grayscale image.
+    """
+    logging.info(f"Applying exposure adjustment method: {method}")
+
+    if method == 'Histogram Equalization':
+        # Ensure image is float between 0 and 1 for skimage.exposure functions
+        if image_np.dtype != np.float64:
+            image_np = image_np.astype(np.float64) / image_np.max()
+        return exposure.equalize_hist(image_np)
+    elif method == 'Gamma':
+        if image_np.dtype != np.float64:
+            image_np = image_np.astype(np.float64) / image_np.max()
+        return exposure.adjust_gamma(image_np, gamma)
+    elif method == 'CLAHE':
+        if image_np.dtype != np.float64:
+            image_np = image_np.astype(np.float64) / image_np.max()
+        return exposure.equalize_adapthist(image_np, clip_limit=clip_limit)
+    elif method == 'None':
+        return image_np
+    else:
+        logging.warning(f"Unknown exposure method: {method}. No adjustment applied.")
+        return image_np
+
 
 def extract_rois_from_image(roi_image_path, target_shape):
     """
@@ -281,30 +329,24 @@ def extract_rois_from_image(roi_image_path, target_shape):
     try:
         roi_img = io.imread(roi_image_path)
 
-        # If image has an alpha channel (RGBA), separate it.
-        # If it's RGB, it will be (H, W, 3).
-        if roi_img.ndim == 3 and roi_img.shape[2] == 4:  # RGBA
+        if roi_img.ndim == 3 and roi_img.shape[2] == 4:
             rgb_img = roi_img[:, :, :3]
             alpha_channel = roi_img[:, :, 3]
-        elif roi_img.ndim == 3 and roi_img.shape[2] == 3:  # RGB
+        elif roi_img.ndim == 3 and roi_img.shape[2] == 3:
             rgb_img = roi_img
-            alpha_channel = None  # No explicit alpha
+            alpha_channel = None
         else:
             sg.popup_ok("ROI Image Warning", "ROI image is not RGB or RGBA. Cannot detect red boxes.")
             logging.warning("ROI image is not RGB/RGBA. Cannot detect red boxes.")
             return []
 
-        # Convert to float and scale to 0-1 if not already (skimage.io.imread often does this)
         if rgb_img.dtype == np.uint8:
             rgb_img = rgb_img / 255.0
 
-        # Define a color range for "red"
-        # These thresholds might need tuning based on the exact shade of red in your ROI image
-        red_threshold_low = 0.7  # Minimum red intensity
-        green_threshold_high = 0.3  # Maximum green intensity
-        blue_threshold_high = 0.3  # Maximum blue intensity
+        red_threshold_low = 0.7
+        green_threshold_high = 0.3
+        blue_threshold_high = 0.3
 
-        # Create a binary mask where red pixels are True
         red_mask = (rgb_img[:, :, 0] > red_threshold_low) & \
                    (rgb_img[:, :, 1] < green_threshold_high) & \
                    (rgb_img[:, :, 2] < blue_threshold_high)
@@ -315,7 +357,6 @@ def extract_rois_from_image(roi_image_path, target_shape):
             logging.warning("No red pixels detected in ROI image.")
             return []
 
-        # Label connected components of red pixels
         labeled_rois = label(red_mask)
         props = regionprops(labeled_rois)
 
@@ -326,16 +367,14 @@ def extract_rois_from_image(roi_image_path, target_shape):
 
         extracted_rois = []
         for prop in props:
-            # Bounding box (min_row, min_col, max_row, max_col)
             min_row, min_col, max_row, max_col = prop.bbox
             x_min = min_col
-            y_min = min_row  # y_min corresponds to the top of the box
+            y_min = min_row
             width = max_col - min_col
             height = max_row - min_row
             extracted_rois.append((x_min, y_min, width, height))
 
-        # Sort ROIs for consistent numbering (e.g., top-left to bottom-right)
-        extracted_rois.sort(key=lambda r: (r[1], r[0]))  # Sort by y_min then x_min
+        extracted_rois.sort(key=lambda r: (r[1], r[0]))
 
         logging.info(f"Found {len(extracted_rois)} ROIs in the image.")
         return extracted_rois
@@ -346,40 +385,65 @@ def extract_rois_from_image(roi_image_path, target_shape):
         return []
 
 
+# Helper function to find contiguous segments and their positions
+def find_contiguous_segments_with_positions(bool_array):
+    """
+    Finds lengths and start/end positions of contiguous True segments in a 1D boolean array.
+    Returns: list of (length, (start_idx, end_idx)) tuples for each segment.
+    start_idx and end_idx are inclusive and relative to the input bool_array.
+    """
+    if not np.any(bool_array):
+        return []
+
+    # Pad with False at ends to easily detect starts/ends of segments
+    padded_array = np.pad(bool_array, (1, 1), 'constant', constant_values=False)
+
+    starts = np.where(np.diff(padded_array.astype(int)) == 1)[0]
+    ends = np.where(np.diff(padded_array.astype(int)) == -1)[0]
+
+    segments = []
+    for i in range(len(starts)):
+        length = ends[i] - starts[i]
+        start_idx = starts[i] - 1  # Adjust for the leading padding
+        end_idx = start_idx + length - 1  # Adjust for 0-indexing to get inclusive end
+        segments.append((length, (start_idx, end_idx)))
+    return segments
+
+
 def main():
     """
     Main function to run the 2D image thickness measurement application.
     """
     logging.info("Starting 2D Image Thickness Measurement Application.")
 
-    # Restored initial variable declarations
-    binary_image = None
-    image_np_original = None  # Store original grayscale for potential overlay
-    image_path = None
-    roi_image_path = None  # Path to the ROI image
+    # Initialize variables that might be used later to prevent UnboundLocalError
+    image_np_original = None
+    image_path = None  # Will be set in the loop
     distance_per_pixel = None
-    default_distance_per_pixel = 28.089  # Default value for distance per pixel
 
-    # Canny edge detection default parameters
+    default_distance_per_pixel = 28.089
     default_canny_sigma = 1.0
     default_canny_low_threshold = 0.1
     default_canny_high_threshold = 0.2
+    default_exposure_method = 'None'
+    default_gamma_value = 1.0
+    default_clahe_clip_limit = 0.01
 
-    # Store Canny parameters in a dictionary to pass to visualize_thickness_2d
     canny_params = {}
+    exposure_params = {}
+    global_rois = []  # Initialized here
+    global_custom_labels = []  # Initialized here
+    roi_metric_choices = {}  # Initialized here
 
-    # Predefined labels for 'v1 transparent'
     V1_TRANSPARENT_LABELS = [
         'T4', 'T11', 'T3', 'T4.1', 'T10', 'T12', 'T2', 'T8', 'T1',
         'T12.1', 'T9', 'T4.3', 'T12.2', 'T4.4', 'T12.3', 'T12.4', 'T13', 'T5'
     ]
 
-    # Create a Tkinter root window but hide it (still needed for filedialogs)
     root = tk.Tk()
-    root.withdraw()  # Hide the main window
+    root.withdraw()
 
-    # --- PySimpleGUI for Initial Parameter Input ---
-    sg.theme('LightBlue3')  # Set a theme for better aesthetics
+    sg.theme('LightBlue3')
 
     layout = [
         [sg.Text('Initial Setup Parameters', font=('Helvetica', 14, 'bold'))],
@@ -395,12 +459,30 @@ def main():
             [sg.Text('High Threshold:'),
              sg.InputText(default_text=str(default_canny_high_threshold), key='-CANNY_HIGH_THRESH-')],
         ])],
+        [sg.Frame('Image Exposure Enhancement', [
+            [sg.Text('Method:'), sg.Combo(['None', 'Histogram Equalization', 'Gamma', 'CLAHE'],
+                                          default_value=default_exposure_method, key='-EXPOSURE_METHOD-',
+                                          enable_events=True)],
+            [sg.Text('Gamma Value:'), sg.InputText(default_text=str(default_gamma_value), key='-GAMMA_VALUE-')],
+            [sg.Text('CLAHE Clip Limit:'),
+             sg.InputText(default_text=str(default_clahe_clip_limit), key='-CLAHE_CLIP_LIMIT-')],
+            [sg.Text('Note: Gamma is for "Gamma" method, Clip Limit for "CLAHE".')],
+        ])],
         [sg.Button('Start Processing', size=(15, 1)), sg.Button('Cancel', size=(15, 1))]
     ]
 
     window = sg.Window('MicroCT Thickness App Setup', layout, finalize=True)
 
-    event, values = window.read()
+    while True:
+        event, values = window.read()
+        if event == sg.WIN_CLOSED or event == 'Cancel' or event == 'Start Processing':
+            break
+
+        if event == '-EXPOSURE_METHOD-':
+            method = values['-EXPOSURE_METHOD-']
+            window['-GAMMA_VALUE-'].update(disabled=(method != 'Gamma'))
+            window['-CLAHE_CLIP_LIMIT-'].update(disabled=(method != 'CLAHE'))
+
     window.close()
 
     if event == sg.WIN_CLOSED or event == 'Cancel':
@@ -408,7 +490,6 @@ def main():
         root.destroy()
         return
 
-    # Parse values from PySimpleGUI window
     plot_basename = values['-PLOT_BASENAME-'] if values['-PLOT_BASENAME-'] else "Untitled"
 
     try:
@@ -439,6 +520,20 @@ def main():
                     f"Invalid Canny High Threshold '{values['-CANNY_HIGH_THRESH-']}'. Using default: {default_canny_high_threshold}")
         canny_high_threshold = default_canny_high_threshold
 
+    exposure_params['method'] = values['-EXPOSURE_METHOD-']
+    try:
+        exposure_params['gamma'] = float(values['-GAMMA_VALUE-'])
+    except ValueError:
+        sg.popup_ok("Input Error",
+                    f"Invalid Gamma Value '{values['-GAMMA_VALUE-']}'. Using default: {default_gamma_value}")
+        exposure_params['gamma'] = default_gamma_value
+    try:
+        exposure_params['clip_limit'] = float(values['-CLAHE_CLIP_LIMIT-'])
+    except ValueError:
+        sg.popup_ok("Input Error",
+                    f"Invalid CLAHE Clip Limit '{values['-CLAHE_CLIP_LIMIT-']}'. Using default: {default_clahe_clip_limit}")
+        exposure_params['clip_limit'] = default_clahe_clip_limit
+
     unit_label = "mm" if distance_per_pixel != 1.0 else "pixels"
     logging.info(f"Plot Basename: {plot_basename}")
     logging.info(f"Distance per pixel: {distance_per_pixel} {unit_label}")
@@ -448,13 +543,13 @@ def main():
         'high_threshold': canny_high_threshold
     }
     logging.info(f"Final Canny parameters for processing: {canny_params}")
+    logging.info(f"Final Exposure parameters for processing: {exposure_params}")
 
-    # --- Step 3: Select Main Image(s) for Analysis ---
     try:
         image_paths = filedialog.askopenfilenames(
             title="Select .bmp image file(s) for analysis",
             filetypes=[("BMP files", "*.bmp"), ("All files", "*.*")],
-            parent=root  # Use the hidden Tkinter root for filedialog
+            parent=root
         )
     except Exception as e:
         sg.popup_error("File Selection Error", f"An error occurred during file selection: {e}")
@@ -467,10 +562,9 @@ def main():
         root.destroy()
         return
 
-    # --- Step 4: Select Output Directory ---
     output_directory = filedialog.askdirectory(
         title="Select Output Directory for Processed Images and Data",
-        parent=root  # Use the hidden Tkinter root for filedialog
+        parent=root
     )
     if not output_directory:
         sg.popup_ok("No Output Directory", "No output directory selected. Exiting application.")
@@ -481,42 +575,45 @@ def main():
     os.makedirs(processed_images_dir, exist_ok=True)
     logging.info(f"Processed images will be saved to: {processed_images_dir}")
 
-    # Destroy the Tkinter root window after all dialogs
     root.destroy()
 
-    # --- Global ROI and Label Setup (asked once) ---
-    global_rois = []
-    global_custom_labels = []
+    # --- ROI Selection and Metric Choice Logic ---
+    # These are initialized globally at the top of main, but populated here.
+    # Ensure they are reset for each run if needed, but for a single run, global initialization is fine.
 
-    # Attempt to load the first image to get its shape for ROI processing
-    first_image_path = image_paths[0]
-    first_binary_image = None
+    first_image_path_for_roi_ref = image_paths[0]  # Use a distinct name for clarity
+    first_binary_image_for_roi_ref = None  # This will be used only for shape for ROI detection
+
     try:
-        temp_image_np = io.imread(first_image_path)
+        temp_image_np = io.imread(first_image_path_for_roi_ref)
         if temp_image_np.ndim == 3:
             temp_image_np = color.rgb2gray(temp_image_np)
-        first_binary_image = binary_fill_holes(canny(temp_image_np, sigma=canny_params['sigma'],
-                                                     low_threshold=canny_params['low_threshold'],
-                                                     high_threshold=canny_params['high_threshold']))
-        if not np.any(first_binary_image):
+
+        temp_image_np_adjusted = adjust_image_exposure(temp_image_np.copy(), **exposure_params)
+
+        # This binary image is used only to get the shape for extract_rois_from_image,
+        # not for the actual thickness calculations within the main loop.
+        first_binary_image_for_roi_ref = binary_fill_holes(canny(temp_image_np_adjusted, sigma=canny_params['sigma'],
+                                                                 low_threshold=canny_params['low_threshold'],
+                                                                 high_threshold=canny_params['high_threshold']))
+        if not np.any(first_binary_image_for_roi_ref):
             sg.popup_ok("First Image Warning",
                         "No object detected in the first image for ROI reference. ROIs will be skipped for all images.")
-            first_binary_image = None  # Treat as if loading failed for ROI purposes
+            first_binary_image_for_roi_ref = None
     except Exception as e:
         sg.popup_error("First Image Load Error",
                        f"Failed to load first image for ROI reference: {e}\nROIs will be skipped for all images.")
-        first_binary_image = None
+        first_binary_image_for_roi_ref = None
 
-    if first_binary_image is not None:
-        # Prompt for ROI image using a custom PySimpleGUI window
+    if first_binary_image_for_roi_ref is not None:
         roi_selection_layout = [
             [sg.Text('Select ROI Image', font=('Helvetica', 14, 'bold'))],
             [sg.Text(
                 'Please select ONE transparent image (e.g., PNG) containing red boxes to define Regions of Interest.')],
-            [sg.Text('ROI Image Path:'), sg.Input(key='-ROI_FILE_PATH-', enable_events=True, disabled=True),
+            [sg.Input(key='-ROI_FILE_PATH-', enable_events=True, visible=True, disabled=True),
              sg.FileBrowse('Browse for ROI Image',
                            file_types=(("PNG Files", "*.png"), ("BMP Files", "*.bmp"), ("All Files", "*.*")))],
-            [sg.Button('Select ROI Image', size=(18, 1)), sg.Button('Skip ROIs', size=(15, 1))]
+            [sg.Button('Confirm Selection', size=(18, 1)), sg.Button('Skip ROIs', size=(15, 1))]
         ]
         roi_selection_window = sg.Window('ROI Image Selection', roi_selection_layout, finalize=True)
 
@@ -526,27 +623,22 @@ def main():
             if roi_event == sg.WIN_CLOSED or roi_event == 'Skip ROIs':
                 sg.popup_ok("ROI Selection Skipped",
                             "No ROI image selected. Proceeding without specific ROI analysis for all images.")
-                break  # Exit loop, roi_image_path remains None
-            elif roi_event == 'Select ROI Image':
+                break
+            elif roi_event == 'Confirm Selection':
                 selected_path = roi_values['-ROI_FILE_PATH-']
                 if selected_path:
                     roi_image_path = selected_path
-                    break  # Valid path selected, exit loop
+                    break
                 else:
                     sg.popup_ok("No File Selected", "Please select an ROI image or click 'Skip ROIs'.")
-            elif roi_event == '-ROI_FILE_PATH-':  # Event from FileBrowse button updating the Input field
-                # The Input field has been updated by FileBrowse, but the user still needs to click 'Select ROI Image'
-                pass  # Do nothing, just wait for a button click
-
         roi_selection_window.close()
 
-        if roi_image_path:  # Only proceed if a path was actually selected
-            global_rois = extract_rois_from_image(roi_image_path, first_binary_image.shape)
+        if roi_image_path:
+            global_rois = extract_rois_from_image(roi_image_path, first_binary_image_for_roi_ref.shape)
             if not global_rois:
                 sg.popup_ok("ROI Warning",
                             f"No valid ROIs extracted from '{os.path.basename(roi_image_path)}'. Proceeding without specific ROI analysis for all images.")
             else:
-                # Prompt for custom labels if ROIs were found
                 use_hardcoded = sg.popup_yes_no(
                     "Custom ROI Labels",
                     "Do you want to use the 'v1 transparent' hardcoded labels?\n"
@@ -555,213 +647,443 @@ def main():
 
                 if use_hardcoded:
                     global_custom_labels = V1_TRANSPARENT_LABELS
+                    if len(global_custom_labels) < len(global_rois):
+                        logging.warning(
+                            "Hardcoded labels are fewer than detected ROIs. Some ROIs will have default labels.")
+                        global_custom_labels.extend(
+                            [f"ROI_{i + 1}" for i in range(len(global_custom_labels), len(global_rois))])
+                    global_custom_labels = global_custom_labels[:len(global_rois)]  # Ensure labels match ROI count
+
                     logging.info(f"Using 'v1 transparent' hardcoded labels: {global_custom_labels}")
                 else:
-                    label_input = sg.popup_get_text(
+                    # Changed variable name here: 'label_tag_input' instead of 'label_input'
+                    label_tag_input = sg.popup_get_text(
                         "Custom ROI Labels",
                         f"Enter {len(global_rois)} custom labels for your ROIs, separated by commas.\n"
                         f"Example: Top, Left, Bottom, Right, ...",
                         default_text=""
                     )
-                    if label_input:
-                        global_custom_labels = [label.strip() for label in label_input.split(',')]
+                    if label_tag_input:  # Check 'label_tag_input'
+                        global_custom_labels = [tag.strip() for tag in label_tag_input.split(',')]  # Use 'tag'
+                        if len(global_custom_labels) != len(global_rois):
+                            sg.popup_warning("Label Count Mismatch",
+                                             f"You provided {len(global_custom_labels)} labels but {len(global_rois)} ROIs were detected. "
+                                             "Some ROIs will use default numbering if labels don't match.")
+                            if len(global_custom_labels) < len(global_rois):
+                                global_custom_labels.extend(
+                                    [f"ROI_{i + 1}" for i in range(len(global_custom_labels), len(global_rois))])
+                            else:
+                                global_custom_labels = global_custom_labels[:len(global_rois)]
+
                         logging.info(f"Custom labels entered: {global_custom_labels}")
                     else:
-                        logging.info("No custom labels entered.")
-        # If roi_image_path is None (due to skip or no selection), global_rois and global_custom_labels remain empty.
-    else:
-        sg.popup_ok("ROI Processing Skipped",
-                    "First image could not be processed for ROI reference. Proceeding without specific ROI analysis for all images.")
+                        logging.info("No custom labels entered, using default ROI numbering.")
+                        global_custom_labels = [f"ROI_{i + 1}" for i in range(len(global_rois))]
 
-    # --- Initialize list to store all samples' ROI data for Excel output ---
+                roi_choice_layout = [
+                    [sg.Text('Select Measurement Metric for Each ROI', font=('Helvetica', 14, 'bold'))],
+                    [sg.Text(
+                        'Choose whether to calculate MAX (full extent) or MIN (largest internal segment) thickness for each detected ROI.')],
+                    [sg.Column([
+                        # Changed 'label' to 'label_tag' in f-string
+                        [sg.Text(f"ROI {idx + 1}: {label_tag}"),
+                         sg.Radio('MAX', group_id=f'roi_metric_{idx}', key=f'-ROI_MAX_{idx}-',
+                                  default=(idx + 1 != 8 and idx + 1 != 10)),
+                         sg.Radio('MIN', group_id=f'roi_metric_{idx}', key=f'-ROI_MIN_{idx}-',
+                                  default=(idx + 1 == 8 or idx + 1 == 10))]
+                        for idx, label_tag in enumerate(global_custom_labels)  # Changed 'label' to 'label_tag'
+                    ], scrollable=True, vertical_scroll_only=True, size=(400, 300))],
+                    [sg.Button('Confirm Choices', size=(15, 1)), sg.Button('Cancel', size=(15, 1))]
+                ]
+
+                roi_choice_window = sg.Window('ROI Metric Selection', roi_choice_layout, finalize=True)
+
+                # Default roi_metric_choices to MAX for all, in case of cancellation
+                roi_metric_choices = {tag: 'MAX' for tag in global_custom_labels}  # Changed 'label' to 'tag'
+
+                while True:
+                    event_roi_choice, values_roi_choice = roi_choice_window.read()
+                    if event_roi_choice == sg.WIN_CLOSED or event_roi_choice == 'Cancel':
+                        sg.popup_ok("ROI Metric Selection Cancelled", "Proceeding with default MAX for all ROIs.")
+                        break
+                    if event_roi_choice == 'Confirm Choices':
+                        for idx, label_tag in enumerate(global_custom_labels):  # Changed 'label' to 'label_tag'
+                            if values_roi_choice[f'-ROI_MAX_{idx}-']:
+                                roi_metric_choices[label_tag] = 'MAX'  # Changed 'label' to 'label_tag'
+                            elif values_roi_choice[f'-ROI_MIN_{idx}-']:
+                                roi_metric_choices[label_tag] = 'MIN'  # Changed 'label' to 'label_tag'
+                        logging.info(f"ROI Metric Choices: {roi_metric_choices}")
+                        break
+                roi_choice_window.close()
+        # No else needed here, global_rois and roi_metric_choices retain their (possibly empty) state.
+
     all_samples_excel_data = []
-    all_unique_roi_labels = set()  # To collect all unique ROI labels across all images
+    all_unique_roi_labels = set()
 
-    # --- Process each selected image ---
-    for sample_index, image_path in enumerate(image_paths):
-        logging.info(f"\n--- Processing Sample {sample_index + 1}: {os.path.basename(image_path)} ---")
+    # Define arrow offset in pixels
+    # This offset will be applied in the Matplotlib (Y-up) coordinate system.
+    # Positive for X (moves right), Negative for Y (moves up, on plot)
+    arrow_offset_pixels = 0  # Revert to 0 for now as the original working code did not have an explicit offset.
 
-        binary_image = None
-        image_np_original = None
+    for sample_index, image_path_current in enumerate(image_paths):  # Renamed to avoid shadowing
+        logging.info(f"\n--- Processing Sample {sample_index + 1}: {os.path.basename(image_path_current)} ---")
+
+        # Define specific binary images for MAX and MIN calculation paths
+        image_for_max_calc = None
+        image_for_min_calc = None
+        current_image_np_original = None  # Renamed for clarity within loop
+        thickness_map_for_viz = None  # Initialize here
 
         try:
-            logging.info(f"Attempting to load main image from: {image_path}")
-            image_np = io.imread(image_path)
+            logging.info(f"Attempting to load main image from: {image_path_current}")
+            image_np = io.imread(image_path_current)
 
-            # Convert to grayscale if it's an RGB image
             if image_np.ndim == 3:
                 logging.info("Converting RGB image to grayscale.")
                 image_np = color.rgb2gray(image_np)
             elif image_np.ndim != 2:
                 sg.popup_error("Image Dimension Error",
-                               f"Unsupported image dimensions: {image_np.ndim}. Expected 2D or 3D (RGB). Skipping {os.path.basename(image_path)}.")
+                               f"Unsupported image dimensions: {image_np.ndim}. Expected 2D or 3D (RGB). Skipping {os.path.basename(image_path_current)}.")
                 logging.error(
-                    f"Unsupported image dimensions: {image_np.ndim}. Skipping {os.path.basename(image_path)}.")
-                continue  # Skip to next image
+                    f"Unsupported image dimensions: {os.path.ndim}. Skipping {os.path.basename(image_path_current)}.")
+                continue
 
-            image_np_original = image_np  # Store original grayscale for overlay
+            current_image_np_original = image_np  # Store original grayscale for overlay
 
-            # --- Segmentation: Edge Detection and Hole Filling ---
-            logging.info("Applying Canny edge detection.")
-            edges = canny(image_np, sigma=canny_params['sigma'], low_threshold=canny_params['low_threshold'],
+            logging.info(f"Applying exposure enhancement: {exposure_params['method']}")
+            image_np_enhanced = adjust_image_exposure(image_np.copy(),
+                                                      method=exposure_params['method'],
+                                                      gamma=exposure_params['gamma'],
+                                                      clip_limit=exposure_params['clip_limit'])
+
+            # --- Pre-calculate binary images for both MAX and MIN interpretations ---
+            edges = canny(image_np_enhanced, sigma=canny_params['sigma'],
+                          low_threshold=canny_params['low_threshold'],
                           high_threshold=canny_params['high_threshold'])
 
-            logging.info("Filling holes to create binary object from edges.")
-            binary_image = binary_fill_holes(edges)
+            # Binary image for MAX: Apply Canny then fill holes (object extent)
+            image_for_max_calc = binary_fill_holes(edges).astype(bool)
+            logging.info("Binary image (for MAX) generated by Canny and filling holes.")
 
-            # Check if the binary image is empty after processing
-            if not np.any(binary_image):
-                sg.popup_ok("No Object Detected",
-                            f"No object was detected in {os.path.basename(image_path)} after processing. Skipping this image.")
-                logging.warning(f"Binary image is empty for {os.path.basename(image_path)}. Skipping.")
-                continue  # Skip to next image
-            else:
-                logging.info(f"Main image loaded, edge-detected, and binarized. Shape: {binary_image.shape}")
+            # Binary image for MIN: Apply Canny WITHOUT filling holes (to see individual lines/features)
+            image_for_min_calc = edges.astype(bool)  # Directly use edges for MIN
+            logging.info("Binary image (for MIN) generated by Canny edges (no hole filling).")
+
+            # Determine the `thickness_map` that will be visualized (it's often based on the 'filled' image)
+            thickness_map_for_viz = measure_thickness_edt(image_for_max_calc)
+
 
         except Exception as e:
             sg.popup_error("Main Image Loading/Processing Error",
-                           f"Failed to load or process main image '{os.path.basename(image_path)}': {e}\nSkipping this image.")
-            logging.error(f"Failed to load or process main image '{os.path.basename(image_path)}': {e}", exc_info=True)
-            continue  # Skip to next image
+                           f"Failed to load or process main image '{os.path.basename(image_path_current)}': {e}\nSkipping this image.")
+            logging.error(f"Failed to load or process main image '{os.path.basename(image_path_current)}': {e}",
+                          exc_info=True)
+            continue
 
         try:
-            # Ensure the binary image is boolean type for EDT
-            binary_image = binary_image.astype(bool)
+            current_sample_excel_row = {'Sample #': sample_index + 1}  # Initialize dictionary for current row
 
-            # --- Measure Thickness (2D Width/Diameter) ---
-            thickness_map = measure_thickness_edt(binary_image)
-
-            # --- Analyze and Collect Results for Excel ---
-            current_sample_excel_row = {'Sample #': sample_index + 1}  # Start sample number from 1
-
-            if global_rois:  # Use the globally defined ROIs
+            if global_rois:  # This block only runs if ROIs were successfully loaded/extracted and global_rois is not empty
                 logging.info(f"\n--- Thickness Statistics for {len(global_rois)} Image-Defined Rectangular ROIs ---")
 
-                roi_stats_for_viz = []  # Data for visualization
+                roi_stats_for_viz = []
 
                 for i, (x_min, y_min, width, height) in enumerate(global_rois):
-                    logging.info(f"  Processing ROI {i + 1} (x:{x_min}, y:{y_min}, w:{width}, h:{height}):")
+                    current_label_tag = global_custom_labels[i]
+                    all_unique_roi_labels.add(current_label_tag)  # Add current label to the set of all labels
 
-                    # Ensure ROI coordinates are within the current image dimensions
-                    # This is important if image sizes vary slightly in the batch
+                    logging.info(
+                        f"  Processing ROI {i + 1} ({current_label_tag}) (x:{x_min}, y:{y_min}, w:{width}, h:{height}):")
+
                     current_x_min = max(0, x_min)
                     current_y_min = max(0, y_min)
-                    current_x_max = min(binary_image.shape[1], x_min + width)
-                    current_y_max = min(binary_image.shape[0], y_min + height)
+                    current_x_max = min(current_image_np_original.shape[1], x_min + width)
+                    current_y_max = min(current_image_np_original.shape[0], y_min + height)
 
-                    # Adjust width and height based on clipped coordinates
                     current_width = current_x_max - current_x_min
                     current_height = current_y_max - current_y_min
 
                     if current_width <= 0 or current_height <= 0:
-                        logging.warning(f"    ROI {i + 1} is outside or too small for current image. Skipping.")
-                        roi_stats_for_viz.append({'coords': (x_min, y_min, width, height),  # Store original coords
-                                                  'mean': np.nan, 'median': np.nan, 'std': np.nan,
-                                                  'custom_label': global_custom_labels[i] if i < len(
-                                                      global_custom_labels) else f"ROI_{i + 1}"})
-                        current_sample_excel_row[global_custom_labels[i] if i < len(
-                            global_custom_labels) else f"ROI_{i + 1}"] = np.nan  # Record NaN for Excel
+                        logging.warning(
+                            f"    ROI {i + 1} ({current_label_tag}) is outside or too small for current image. Skipping.")
+                        roi_stats_for_viz.append({'coords': (x_min, y_min, width, height),
+                                                  'mean': np.nan, 'median': np.nan, 'std': np.nan, 'value': np.nan,
+                                                  'custom_label': current_label_tag,
+                                                  'metric_type': 'N/A'})
+                        current_sample_excel_row[current_label_tag] = np.nan  # Ensure NaN is recorded for Excel
                         continue
 
-                    roi_binary_segment = binary_image[current_y_min: current_y_max, current_x_min: current_x_max]
+                    metric_type = roi_metric_choices.get(current_label_tag, 'MAX')
 
-                    current_custom_label = global_custom_labels[i] if i < len(global_custom_labels) else f"ROI_{i + 1}"
-                    all_unique_roi_labels.add(current_custom_label)  # Add to set of all labels
+                    directional_measurements_for_roi = []
+                    raw_line_start_xy_roi = None
+                    raw_line_end_xy_roi = None
 
-                    if not np.any(roi_binary_segment):
-                        logging.info(
-                            f"    ROI {i + 1}: No object pixels in this region. Skipping directional measurement.")
-                        roi_stats_for_viz.append({'coords': (x_min, y_min, width, height),
-                                                  'mean': np.nan, 'median': np.nan, 'std': np.nan,
-                                                  'custom_label': current_custom_label})
-                        current_sample_excel_row[current_custom_label] = np.nan  # Record NaN for Excel
-                        continue
+                    chosen_line_length_pixels = -1 if metric_type == 'MAX' else float('inf')
 
-                    directional_measurements = []
-                    if current_width > current_height:  # Horizontal ROI, measure X distances
-                        for r_idx in range(roi_binary_segment.shape[0]):
-                            row_pixels = roi_binary_segment[r_idx, :]
-                            true_cols = np.where(row_pixels)[0]
-                            if true_cols.size > 0:
-                                distance = true_cols.max() - true_cols.min() + 1
-                                directional_measurements.append(distance)
-                    else:  # Vertical ROI (height >= width), measure Y distances
-                        for c_idx in range(roi_binary_segment.shape[1]):
-                            col_pixels = roi_binary_segment[:, c_idx]
-                            true_rows = np.where(col_pixels)[0]
-                            if true_rows.size > 0:
-                                distance = true_rows.max() - true_rows.min() + 1
-                                directional_measurements.append(distance)
+                    scan_axis_is_row = (current_width > current_height)
 
-                    if directional_measurements:
-                        calibrated_measurements = np.array(directional_measurements) / distance_per_pixel
-                        mean_t = np.mean(calibrated_measurements)
-                        median_t = np.median(calibrated_measurements)
-                        std_t = np.std(calibrated_measurements)
+                    if metric_type == 'MAX':
+                        roi_binary_segment = image_for_max_calc[current_y_min: current_y_max,
+                                             current_x_min: current_x_max]
 
-                        logging.info(
-                            f"    Min: {np.min(calibrated_measurements):.2f} {unit_label}, Max: {np.max(calibrated_measurements):.2f} {unit_label}, Mean: {mean_t:.2f} {unit_label}, Median: {median_t:.2f} {unit_label}, StdDev: {std_t:.2f} {unit_label}")
+                        if scan_axis_is_row:
+                            for r_idx in range(roi_binary_segment.shape[0]):
+                                line_pixels = roi_binary_segment[r_idx, :]
+                                true_coords_in_line = np.where(line_pixels)[0]
 
-                        roi_stats_for_viz.append({'coords': (x_min, y_min, width, height),
-                                                  'mean': mean_t, 'median': median_t, 'std': std_t,
-                                                  'custom_label': current_custom_label})
-                        current_sample_excel_row[current_custom_label] = median_t  # Record median for Excel
+                                if true_coords_in_line.size > 0:
+                                    current_line_length = true_coords_in_line.max() - true_coords_in_line.min() + 1
+                                    directional_measurements_for_roi.append(current_line_length)
+
+                                    if current_line_length > chosen_line_length_pixels:
+                                        chosen_line_length_pixels = current_line_length
+                                        raw_line_start_xy_roi = (true_coords_in_line.min(), r_idx)
+                                        raw_line_end_xy_roi = (true_coords_in_line.max(), r_idx)
+                        else:
+                            for c_idx in range(roi_binary_segment.shape[1]):
+                                line_pixels = roi_binary_segment[:, c_idx]
+                                true_coords_in_line = np.where(line_pixels)[0]
+
+                                if true_coords_in_line.size > 0:
+                                    current_line_length = true_coords_in_line.max() - true_coords_in_line.min() + 1
+                                    directional_measurements_for_roi.append(current_line_length)
+
+                                    if current_line_length > chosen_line_length_pixels:
+                                        chosen_line_length_pixels = current_line_length
+                                        raw_line_start_xy_roi = (c_idx, true_coords_in_line.min())
+                                        raw_line_end_xy_roi = (c_idx, true_coords_in_line.max())
+
+                    else:  # metric_type == 'MIN'
+                        roi_edges_segment = image_for_min_calc[current_y_min: current_y_max,
+                                            current_x_min: current_x_max]
+
+                        if scan_axis_is_row:
+                            for r_idx in range(roi_edges_segment.shape[0]):
+                                line_pixels = roi_edges_segment[r_idx, :]
+                                segments = find_contiguous_segments_with_positions(line_pixels)
+                                true_coords_in_line = np.where(line_pixels)[0]
+
+                                if len(segments) >= 3:
+                                    segments.sort(key=lambda x: x[1][0])
+
+                                    segment_start_coords = [s[1][0] for s in segments]
+                                    segment_end_coords = [s[1][1] for s in segments]
+
+                                    gap1_start = segment_end_coords[0] + 1
+                                    gap1_end = segment_start_coords[1]
+                                    gap1_length = gap1_end - gap1_start
+
+                                    gap2_start = segment_end_coords[1] + 1
+                                    gap2_end = segment_start_coords[2]
+                                    gap2_length = gap2_end - gap2_start
+
+                                    current_line_measure = max(gap1_length, gap2_length)
+
+                                    if current_line_measure > 0:
+                                        directional_measurements_for_roi.append(current_line_measure)
+
+                                        if gap1_length >= gap2_length:
+                                            temp_start_coord = gap1_start
+                                            temp_end_coord = gap1_end - 1
+                                        else:
+                                            temp_start_coord = gap2_start
+                                            temp_end_coord = gap2_end - 1
+
+                                        if current_line_measure < chosen_line_length_pixels:
+                                            chosen_line_length_pixels = current_line_measure
+                                            raw_line_start_xy_roi = (temp_start_coord, r_idx)
+                                            raw_line_end_xy_roi = (temp_end_coord, r_idx)
+                                    else:
+                                        logging.debug(
+                                            f"ROI {current_label_tag} (H-scan, r_idx {r_idx}): Calculated gap(s) not positive. Skipping.")
+                                else:  # Fallback to MAX case: <= 2 segments, measure overall span
+                                    if true_coords_in_line.size > 0:
+                                        current_line_measure = true_coords_in_line.max() - true_coords_in_line.min() + 1
+                                        directional_measurements_for_roi.append(current_line_measure)
+                                        logging.debug(
+                                            f"ROI {current_label_tag} (H-scan, r_idx {r_idx}): Falling back to MAX logic (span={current_line_measure}).")
+
+                                        if current_line_measure < chosen_line_length_pixels:
+                                            chosen_line_length_pixels = current_line_measure
+                                            raw_line_start_xy_roi = (true_coords_in_line.min(), r_idx)
+                                            raw_line_end_xy_roi = (true_coords_in_line.max(), r_idx)
+                                    else:
+                                        logging.debug(
+                                            f"ROI {current_label_tag} (H-scan, r_idx {r_idx}): No measurable features for MIN or fallback. Skipping.")
+
+
+                        else:  # Vertical ROI
+                            for c_idx in range(roi_edges_segment.shape[1]):
+                                line_pixels = roi_edges_segment[:, c_idx]
+                                segments = find_contiguous_segments_with_positions(line_pixels)
+                                true_coords_in_line = np.where(line_pixels)[0]
+
+                                if len(segments) >= 3:
+                                    segments.sort(key=lambda x: x[1][0])  # Sort by start_idx (row)
+
+                                    segment_start_coords = [s[1][0] for s in segments]
+                                    segment_end_coords = [s[1][1] for s in segments]
+
+                                    gap1_start = segment_end_coords[0] + 1
+                                    gap1_end = segment_start_coords[1]
+                                    gap1_length = gap1_end - gap1_start
+
+                                    gap2_start = segment_end_coords[1] + 1
+                                    gap2_end = segment_start_coords[2]
+                                    gap2_length = gap2_end - gap2_start
+
+                                    current_line_measure = max(gap1_length, gap2_length)
+
+                                    if current_line_measure > 0:
+                                        directional_measurements_for_roi.append(current_line_measure)
+
+                                        if gap1_length >= gap2_length:
+                                            temp_start_coord = gap1_start
+                                            temp_end_coord = gap1_end - 1
+                                        else:
+                                            temp_start_coord = gap2_start
+                                            temp_end_coord = gap2_end - 1
+
+                                        if current_line_measure < chosen_line_length_pixels:
+                                            chosen_line_length_pixels = current_line_measure
+                                            raw_line_start_xy_roi = (c_idx, temp_start_coord)
+                                            raw_line_end_xy_roi = (c_idx, temp_end_coord)
+                                    else:
+                                        logging.debug(
+                                            f"ROI {current_label_tag} (V-scan, c_idx {c_idx}): Calculated gap(s) not positive. Skipping.")
+                                else:  # Fallback to MAX case: <= 2 segments, measure overall span
+                                    if true_coords_in_line.size > 0:
+                                        current_line_measure = true_coords_in_line.max() - true_coords_in_line.min() + 1
+                                        directional_measurements_for_roi.append(current_line_measure)
+                                        logging.debug(
+                                            f"ROI {current_label_tag} (V-scan, c_idx {c_idx}): Falling back to MAX logic (span={current_line_measure}).")
+
+                                        if current_line_measure < chosen_line_length_pixels:
+                                            chosen_line_length_pixels = current_line_measure
+                                            raw_line_start_xy_roi = (c_idx, true_coords_in_line.min())
+                                            raw_line_end_xy_roi = (c_idx, true_coords_in_line.max())
+                                    else:
+                                        logging.debug(
+                                            f"ROI {current_label_tag} (V-scan, c_idx {c_idx}): No measurable features for MIN or fallback. Skipping.")
+
+                    if directional_measurements_for_roi:
+                        calibrated_measurements = np.array(directional_measurements_for_roi) / distance_per_pixel
+
+                        if calibrated_measurements.size > 0:
+                            mean_t = np.mean(calibrated_measurements)
+                            median_t = np.median(calibrated_measurements)
+                            std_t = np.std(calibrated_measurements)
+
+                            if metric_type == 'MAX':
+                                chosen_metric_value = np.max(calibrated_measurements)
+                            else:  # MIN (based on identified gaps or fallback spans)
+                                chosen_metric_value = np.min(calibrated_measurements)
+
+                            logging.info(
+                                f"    Min of measured values: {np.min(calibrated_measurements):.2f} {unit_label}, Max of measured values: {np.max(calibrated_measurements):.2f} {unit_label}, Mean: {mean_t:.2f} {unit_label}, Median: {median_t:.2f} {unit_label}, StdDev: {std_t:.2f} {unit_label}")
+                            logging.info(f"    Chosen Metric ({metric_type}): {chosen_metric_value:.2f} {unit_label}")
+
+                            plot_start_xy = None
+                            plot_end_xy = None
+                            # Apply global ROI offset and Y-flip first
+                            if raw_line_start_xy_roi and raw_line_end_xy_roi:
+                                img_height_total = current_image_np_original.shape[0]
+
+                                x1_global_raw = current_x_min + raw_line_start_xy_roi[0]
+                                y1_global_raw = current_y_min + raw_line_start_xy_roi[1]
+                                x2_global_raw = current_x_min + raw_line_end_xy_roi[0]
+                                y2_global_raw = current_y_min + raw_line_end_xy_roi[1]
+
+                                # Convert to Matplotlib plot coordinates (Y-axis inverted)
+                                plot_x1_final = x1_global_raw
+                                plot_y1_final = img_height_total - 1 - y1_global_raw
+                                plot_x2_final = x2_global_raw
+                                plot_y2_final = img_height_total - 1 - y2_global_raw
+
+                                # No explicit arrow_offset_pixels applied here, as per your request
+                                plot_start_xy = (plot_x1_final, plot_y1_final)
+                                plot_end_xy = (plot_x2_final, plot_y2_final)
+
+                            roi_stats_for_viz.append({'coords': (x_min, y_min, width, height),
+                                                      'mean': mean_t, 'median': median_t, 'std': std_t,
+                                                      'value': chosen_metric_value,
+                                                      'custom_label': current_label_tag,
+                                                      'metric_type': metric_type,
+                                                      'max_t_start_plot_xy': plot_start_xy if metric_type == 'MAX' else None,
+                                                      'max_t_end_plot_xy': plot_end_xy if metric_type == 'MAX' else None,
+                                                      'min_t_start_plot_xy': plot_start_xy if metric_type == 'MIN' else None,
+                                                      'min_t_end_plot_xy': plot_end_xy if metric_type == 'MIN' else None
+                                                      })
+                            # This is the line that records the value for Excel
+                            current_sample_excel_row[current_label_tag] = chosen_metric_value
+                        else:
+                            logging.info(
+                                f"    ROI {i + 1} ({current_label_tag}): No valid measurements after calibration or filtering. Skipping.")
+                            roi_stats_for_viz.append({'coords': (x_min, y_min, width, height),
+                                                      'mean': np.nan, 'median': np.nan, 'std': np.nan, 'value': np.nan,
+                                                      'custom_label': current_label_tag,
+                                                      'metric_type': 'N/A',
+                                                      'max_t_start_plot_xy': None, 'max_t_end_plot_xy': None,
+                                                      'min_t_start_plot_xy': None, 'min_t_end_plot_xy': None})
+                            current_sample_excel_row[current_label_tag] = np.nan
                     else:
-                        logging.info(f"    ROI {i + 1}: No valid directional measurements found. Skipping.")
+                        logging.info(
+                            f"    ROI {i + 1} ({current_label_tag}): No valid directional measurements found. Skipping.")
                         roi_stats_for_viz.append({'coords': (x_min, y_min, width, height),
-                                                  'mean': np.nan, 'median': np.nan, 'std': np.nan,
-                                                  'custom_label': current_custom_label})
-                        current_sample_excel_row[current_custom_label] = np.nan  # Record NaN for Excel
+                                                  'mean': np.nan, 'median': np.nan, 'std': np.nan, 'value': np.nan,
+                                                  'custom_label': current_label_tag,
+                                                  'metric_type': 'N/A',
+                                                  'max_t_start_plot_xy': None, 'max_t_end_plot_xy': None,
+                                                  'min_t_start_plot_xy': None, 'min_t_end_plot_xy': None})
+                        current_sample_excel_row[current_label_tag] = np.nan
 
                 all_samples_excel_data.append(current_sample_excel_row)
 
-            else:  # Fallback to overall EDT statistics if no ROIs were defined globally
-                logging.info("\n--- Overall Thickness Statistics (No specific ROIs defined) ---")
-                thickness_map_calibrated_overall = thickness_map / distance_per_pixel
-                foreground_thickness_values = thickness_map_calibrated_overall[binary_image]
+            else:
+                thickness_map_calibrated_overall = measure_thickness_edt(image_for_max_calc) / distance_per_pixel
+                foreground_thickness_values = thickness_map_calibrated_overall[image_for_max_calc]
 
-                overall_median = np.nan
+                overall_max = np.nan
                 if foreground_thickness_values.size > 0:
-                    overall_median = np.median(foreground_thickness_values)
+                    overall_max = np.max(foreground_thickness_values)
                     logging.info(
                         f"Overall Minimum thickness (2D): {np.min(foreground_thickness_values):.2f} {unit_label}")
-                    logging.info(
-                        f"Overall Maximum thickness (2D): {np.max(foreground_thickness_values):.2f} {unit_label}")
+                    logging.info(f"Overall Maximum thickness (2D): {overall_max:.2f} {unit_label}")
                     logging.info(
                         f"Overall Average thickness (2D): {np.mean(foreground_thickness_values):.2f} {unit_label}")
-                    logging.info(f"Overall Median thickness (2D): {overall_median:.2f} {unit_label}")
+                    logging.info(
+                        f"Overall Median thickness (2D): {np.median(foreground_thickness_values):.2f} {unit_label}")
                     logging.info(
                         f"Overall Standard deviation of thickness (2D): {np.std(foreground_thickness_values):.2f} {unit_label}")
                 else:
                     logging.warning("No foreground pixels detected for overall statistics.")
 
-                # For overall stats, add a generic "Overall_Median" label to Excel data
-                current_sample_excel_row['Overall_Median'] = overall_median
-                all_unique_roi_labels.add('Overall_Median')
+                current_sample_excel_row['Overall_Max'] = overall_max
+                all_unique_roi_labels.add('Overall_Max')
                 all_samples_excel_data.append(current_sample_excel_row)
 
-            # --- Save the processed image plot ---
-            output_filename = os.path.splitext(os.path.basename(image_path))[0] + "-processed.png"
+            output_filename = os.path.splitext(os.path.basename(image_path_current))[0] + "-processed.png"
             plot_save_path = os.path.join(processed_images_dir, output_filename)
 
-            visualize_thickness_2d(thickness_map / distance_per_pixel,  # Pass calibrated map for visualization
-                                   original_image_for_overlay=image_np_original,
+            visualize_thickness_2d(thickness_map_for_viz / distance_per_pixel,
+                                   original_image_for_overlay=current_image_np_original,
                                    unit_label=unit_label, roi_data=roi_stats_for_viz,
                                    distance_per_pixel_for_drawing=distance_per_pixel,
                                    plot_basename=plot_basename,
-                                   original_filename=image_path,
+                                   original_filename=image_path_current,
                                    canny_params=canny_params,
-                                   save_path=plot_save_path)  # Pass save_path here
+                                   exposure_params=exposure_params,
+                                   save_path=plot_save_path)
 
         except Exception as e:
             sg.popup_error("Processing Error",
-                           f"An error occurred during thickness measurement or visualization for '{os.path.basename(image_path)}': {e}\nSkipping this image.")
+                           f"An error occurred during thickness measurement or visualization for '{os.path.basename(image_path_current)}': {e}\nSkipping this image.")
             logging.error(
-                f"An error occurred during thickness measurement or visualization for '{os.path.basename(image_path)}': {e}",
+                f"An error occurred during thickness measurement or visualization for '{os.path.basename(image_path_current)}': {e}",
                 exc_info=True)
-            continue  # Skip to next image
+            continue
 
-    # --- Compile and Save Excel Data ---
     if all_samples_excel_data:
         # Ensure all ROI labels are present in each row, filling with NaN if missing
         sorted_roi_labels = sorted(list(all_unique_roi_labels))
@@ -785,7 +1107,6 @@ def main():
 
     logging.info("2D Image Thickness Measurement Application finished.")
 
-#try to improve the accuracy of distance selection, perhaps max distance is better, cleaning up the RIO image may help this along with better contrast
 
 if __name__ == "__main__":
     main()
